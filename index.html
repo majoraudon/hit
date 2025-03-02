@@ -1,0 +1,2349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hit Rage Room</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        #game-container {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: white;
+            font-size: 24px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+            user-select: none;
+        }
+        #score {
+            margin-bottom: 10px;
+        }
+        #start-screen, #end-screen {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            font-size: 28px;
+            text-align: center;
+            z-index: 100;
+        }
+        button {
+            margin-top: 20px;
+            padding: 15px 30px;
+            font-size: 20px;
+            background-color: #ff4d4d;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #ff1a1a;
+        }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 20px;
+            pointer-events: none;
+            user-select: none;
+            transition: all 0.2s ease;
+        }
+        #crosshair::before, #crosshair::after {
+            content: '';
+            position: absolute;
+            background-color: white;
+        }
+        #crosshair::before {
+            width: 2px;
+            height: 20px;
+            left: 9px;
+            top: 0;
+        }
+        #crosshair::after {
+            width: 20px;
+            height: 2px;
+            left: 0;
+            top: 9px;
+        }
+        #crosshair.target {
+            width: 24px;
+            height: 24px;
+        }
+        #crosshair.target::before, #crosshair.target::after {
+            background-color: #ff4d4d;
+        }
+        .damage-indicator {
+            position: absolute;
+            color: #ff4d4d;
+            font-weight: bold;
+            font-size: 32px;
+            text-shadow: 3px 3px 0px #000, -3px -3px 0px #000, 3px -3px 0px #000, -3px 3px 0px #000;
+            pointer-events: none;
+            user-select: none;
+            animation: fadeUp 1s forwards;
+            z-index: 10;
+        }
+        @keyframes fadeUp {
+            0% {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+            20% {
+                opacity: 1;
+                transform: translateY(-10px) scale(1.2);
+            }
+            100% {
+                opacity: 0;
+                transform: translateY(-50px) scale(0.8);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container"></div>
+    <div id="ui-overlay">
+        <div id="score">Score: 0</div>
+        <div id="timer">Time: 60s</div>
+    </div>
+    <div id="crosshair"></div>
+    
+    <div id="start-screen">
+        <h1>Hit Rage Room</h1>
+        <p>Use WASD to move, mouse to look around<br>Click to break items</p>
+        <button id="start-button">Start Game</button>
+    </div>
+    
+    <div id="end-screen" style="display: none;">
+        <h1>Time's Up!</h1>
+        <p id="final-score">Your score: 0</p>
+        <button id="restart-button">Play Again</button>
+        <button id="share-button">Share Score</button>
+    </div>
+
+    <!-- Import Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+
+    <script>
+        // Game variables
+        let scene, camera, renderer, controls;
+        let moveForward = false;
+        let moveBackward = false;
+        let moveLeft = false;
+        let moveRight = false;
+        let canJump = false;
+        let prevTime = performance.now();
+        let velocity = new THREE.Vector3();
+        let direction = new THREE.Vector3();
+        let raycaster = new THREE.Raycaster();
+        let mouse = new THREE.Vector2();
+        let breakableObjects = [];
+        let score = 0;
+        let timeRemaining = 60;
+        let gameActive = false;
+        let playerHeight = 1.8;
+        let playerSpeed = 2.0;
+        let wallSize = 10;
+        let gameTimer;
+        let verticalLookAngle = 0; // Current vertical look angle
+
+        // Sound effects
+        let audioListener;
+        let breakSounds = {}; // Object to store different break sounds
+        let hitSounds = {}; // Object to store different hit sounds
+        let ambientSound; // Ambient background sound
+        let footstepSound; // Footstep sound
+        let lastFootstepTime = 0; // Track when last footstep played
+        let soundEnabled = true;
+        let audioContext;
+        let audioInitialized = false; // Flag to track if audio was properly initialized
+
+        // Initialize the game
+        function init() {
+            // Create scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x333333);
+            
+            // Create camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.y = playerHeight;
+            
+            // Set rotation order to YXZ - this ensures proper FPS controls without Z-tilt
+            camera.rotation.order = "YXZ";
+            
+            // Initialize rotation tracking
+            camera.userData = { 
+                horizontalAngle: 0,
+                verticalAngle: 0
+            };
+            
+            // Initialize vertical look angle to 0 (looking straight ahead)
+            verticalLookAngle = 0;
+            
+            // Set camera rotation to look forward (without tilting)
+            camera.rotation.x = 0;
+            camera.rotation.y = 0;
+            camera.rotation.z = 0;  // Explicitly prevent any z-axis tilt
+            
+            // Create renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.getElementById('game-container').appendChild(renderer.domElement);
+            
+            // Audio will be set up after user interaction
+            // Do not set up audio here - we'll do it on game start
+            
+            // Add audio troubleshooting button to UI
+            addAudioTroubleshootingButton();
+            
+            // Create room and objects
+            createRoom();
+            createBreakableObjects();
+            
+            // Add lights
+            createLights();
+            
+            // Set up controls
+            setupControls();
+            
+            // Add event listeners
+            window.addEventListener('resize', onWindowResize, false);
+            document.addEventListener('click', onMouseClick, false);
+            
+            // Set up start and restart buttons
+            document.getElementById('start-button').addEventListener('click', startGame);
+            document.getElementById('restart-button').addEventListener('click', startGame);
+            document.getElementById('share-button').addEventListener('click', shareScore);
+            
+            // Start animation loop
+            animate();
+        }
+        
+        function addAudioTroubleshootingButton() {
+            const button = document.createElement('button');
+            button.innerHTML = 'Fix Sound';
+            button.style.position = 'absolute';
+            button.style.bottom = '20px';
+            button.style.right = '20px';
+            button.style.zIndex = '1000';
+            button.style.padding = '10px 15px';
+            button.style.backgroundColor = '#ff4d4d';
+            button.style.color = 'white';
+            button.style.border = 'none';
+            button.style.borderRadius = '5px';
+            button.style.cursor = 'pointer';
+            
+            button.onclick = function() {
+                troubleshootAudio();
+            };
+            
+            document.body.appendChild(button);
+        }
+        
+        function troubleshootAudio() {
+            console.log("Troubleshooting audio...");
+            
+            // Reset audio system
+            if (audioContext) {
+                try {
+                    // Try to close the current context
+                    if (audioContext.state !== 'closed') {
+                        audioContext.close().then(() => {
+                            console.log("Successfully closed old AudioContext");
+                            createFreshAudioSystem();
+                        }).catch(error => {
+                            console.error("Error closing AudioContext:", error);
+                            // Try to create a new one anyway
+                            createFreshAudioSystem();
+                        });
+                    } else {
+                        createFreshAudioSystem();
+                    }
+                } catch (error) {
+                    console.error("Error during audio troubleshooting:", error);
+                    // Try the browser's native Audio API as a fallback
+                    useBrowserAudioFallback();
+                }
+            } else {
+                createFreshAudioSystem();
+            }
+            
+            // Show feedback to user
+            const message = document.createElement('div');
+            message.textContent = 'Sound system reset. Try breaking objects now.';
+            message.style.position = 'absolute';
+            message.style.top = '50%';
+            message.style.left = '50%';
+            message.style.transform = 'translate(-50%, -50%)';
+            message.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+            message.style.color = 'white';
+            message.style.padding = '20px';
+            message.style.borderRadius = '5px';
+            message.style.zIndex = '2000';
+            
+            document.body.appendChild(message);
+            setTimeout(() => {
+                document.body.removeChild(message);
+            }, 3000);
+        }
+        
+        function createFreshAudioSystem() {
+            console.log("Creating fresh audio system");
+            
+            // Reset variables
+            audioListener = null;
+            breakSounds = {};
+            hitSounds = {};
+            ambientSound = null;
+            footstepSound = null;
+            audioInitialized = false;
+            
+            // Create new audio context
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                console.log("Created new AudioContext with state:", audioContext.state);
+                
+                // Force a resume attempt
+                audioContext.resume().then(() => {
+                    console.log("Successfully resumed new AudioContext");
+                    setupAudio(); // Set up the audio system again
+                    
+                    // Play a test sound
+                    playTestSound();
+                }).catch(error => {
+                    console.error("Failed to resume new AudioContext:", error);
+                    useBrowserAudioFallback();
+                });
+            } catch (error) {
+                console.error("Failed to create new AudioContext:", error);
+                useBrowserAudioFallback();
+            }
+        }
+        
+        function useBrowserAudioFallback() {
+            console.log("Using browser Audio API fallback");
+            
+            // Set audioContext to null to prevent further THREE.js audio attempts
+            audioContext = null;
+            audioListener = null;
+            
+            // Create fallback sounds using the browser's Audio API
+            try {
+                // Create a test sound
+                const fallbackSound = document.createElement('audio');
+                // Use an data URI for a short beep sound to avoid loading issues
+                fallbackSound.src = 'data:audio/wav;base64,UklGRnQGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU8GAACBgIF/gn6Df4B+gn2EfIN/hoCEgIWBg4OehHpV55KzR5aFgGaBgHiWeF9Xm1FNm0OBWlJHnwt/gXmIYYN0f0mYmEeDgYOGf4V5hImFeYKDgIZ8iX6Df4iBgYqBCX2PiwqEg4KHgIeLg36FiYh9iYSEh4SIhISJgIWKiIWIiIWDiIODhoWCiISEh4KHgoiChomDhoSFhg2WRo1y6mCnTVhKy2TPW9RMoVP4S8ZH6FfdQpVcuF1OclOzaYBvXW6abJJsj2mZBH+CgH2GfoF8ioCAfIV+gIZ7h36AfYZ/gH6Ef4GBgX+EfoF/hX6Bf4J/g32Ef4J+gYWAfISCfIWAfYR9gIR+f4R+gH9/gYF/gIB+gn5/f4B+gH5/fn9+f39+f35/f39/fn9/f35/gH9/f39/gH+AgICBgYGAgoGCgYKCg4KCgYOCg4GDgoOBhIKDgYSCg4GEgoOBhIKDgYSChIGEgoSBhIKEgYSChIGEgoSBhYOFgYWDhYKGg4WChoOGgoaDhoKGg4aCh4OHgoeDh4KIg4iCiIOIgoiEiIKJg4mCiYOJgoqDioKKg4qCi4OLgo2FjIKNhI2CjoSOgpCFkIORhZGDkoaShJOGk4SUh5SElYeVhJaHloSXiJaEmIiYhJmImYSaiZqDm4qcg5yLnYOejZ6DoI2fg6KOoYSjj6KEpI+ihaaQo4anjqOIp46kiaiPpIqojakLqguqjaqPqo+rj6uQrJCskq2SrpOuk6+UsJSylbKWspezl7OYtJm0mrabtpy3nbeet5+3n7igt6K4orqjuqS7pLymvKe8qb2pvaq+qsOux7PKit+f45vooeyh8aP2ovuh0Kn6p9mn/6bBm/2l8KXypfCl9KbtpfSl+6X9peql/qX3pfyl/KX7peyl96XSpfelxaXPpb6lwKW1pdOlkqWopa+lraWwpYulkqWHpYKleaV3pWGlZqVHpfulMaUopSClFqUKpel7ZF9RhlWLaYpTivChf70Wva59AI1XhvaHBoSDhIGc7o8Phwx7hWyGQouJeI2JjYhHiYuHS4hGhkl+eX9ugHB5cHJtYWdobWdkZGBhMWpWM2xlbWlybHJzc3Nxc3l0d3d3eXh8e31+gICAfIWChIOFiIWLiY2LkIuSj5GUkpWVlZmXmZmaC5iFko6WjpaJl4SWApV7knuOUotgiA6GU4Mpg1t/lH6gfLN74HkSeH53IHYvdDByEnGwbwxvQW16a95qp2nuZ5JnAGcCZgJitGBXXu9chVvnWS5MK3K3dLVyw3G4dA91CHW5csxxlnBMbp9tX2slamhcXn5MxIeR0pjUo9erFLIDstWweLOmmJW1lJOTo5CkjaOCp4yhiZuKBYsFb2+8X91QzkxEUYZIu1LKRJl9r3j1gDKIvnsJh7t2tX5oc6BlRFj1aDNPu0ueTuVKzk+sWfBMhk48TndJ9E3OT3BF8UhJSGZCK0f3Gh8iiDZOOGVF/UkDUfxXFFrsXGJhLlxbYYRTCVwMVBBP0lRWS1BQrUg4Ss5GHkPaJYYn5iC2JSkeJh+QGSUc8xWAGrYTwhb9EnwVNRNCFU0TfBQEFHMRgBTmDd0VSgwPEyULahPNCNkVFgZ/FYwEaBX7/6kVLP3hFfD9WBRL/jEVRf5aFZ3+gBbn/3oWyf9qFnH/RxSe/vkSpP1IE/r8VxRS/M0TjvteFJL6CxQp+agR/PaOEQLzXxLI7sARvekaEMjkyg2T3ooKptZpCVrIqgot1bUNZeBdDcXvXgsk/iUJcQuoBuEXNQU6IsAEwiq8BBQxAAWANPAEujVZBO82vAPpN24D6jcfA703xwKQNxYCKDdOARs2ZQByNRsAHDSy/7cysf94MZj/LzBz/80uMP9cLe/+9yuL/oEqiv4vKrT+aCvk/iIt4P6MLd3+0S3f/gwu6P5eLhv/xS6F/20v1f8aMLr/rzBl/zkxCP/EMJv+HC/g/S4tefw7K1b7OCld+jYnvPlAJaT5MyOz+SIhwflJHwL6dB1j+pMcC/ufG/r7phtN/aMbpP2iG+z9mhsa/pQbGf6OGyT+mBsw/rEbX/7QG6T+7xv7/gwcYf8rHLr/SRwRAGocYACSHLQAuhwKAdocXAH4HLMBGh0HAlIdTwKNHY8CyB3MAgUeDQNAHk8DfB6RA7EezQPyHg4ELx9PBG4fbwSRH48EsB+1BL0f2QS9H/YEsR8KBaEfGwWRHyYFfh8uBWgfMQVRHy8FOR8nBRofHgUBHxMF3R4IBcQe+wSlHu4Ejh7aBHEeuwRVHpkEPx53BCkeUQQUHigEBB4BBPYd1gPnHa0D2h2FA80dYAPFHUIDvB0nA7YdEAOvHf4CrB3sAqUd3QKdHc4CjB3CAnYdtQJbHakCOh2eAgkdkwLSHIgCkhx+AkgcdgLyG2wCnBtiAkYbWQLxGlACoRpKAkwfJAStJNIGfizJCqE1BA7QPNsQFUNTE0JILhVcTFMXgk+XGD9S0RkmVOgaaFWQG0dWGBwkVoYc51UYHXpVkhxPVP8bJVNfG9hRnBqHUB8ZRE94F/JN2xVNTEUU4EqqEm9JChEkSJ4P0ka9DvZFQw36RAENDUTjDGNDhwwBQ0MM40KxDDBDBw35QkgNw0JrDZxCgA1xQpgNUEKpDS9CrA0TQrANGEKvDVpCsA3CQrQNQ0O7DbRDxw0wRM4NlkTXDS5F3w2sRekNOEb5DcNG/A1sRw0OL0g/Dh9JgQ4jSsgOJkv3Di9MJg80TU8POk56D0tPpQ9dUM8PcVH8D35SKxCTU1kQolSGEJ9VqRCGVsYQX1fUECZY2hDeWNQQZFnHEMBZsBAHWosQKVpiEEVaOhBgWggQe1rOD7Na';
+                
+                fallbackSound.addEventListener('canplaythrough', function() {
+                    console.log("Fallback sound can play through");
+                    fallbackSound.play().then(() => {
+                        console.log("Fallback sound played successfully");
+                        soundEnabled = true;
+                    }).catch(error => {
+                        console.error("Failed to play fallback sound:", error);
+                    });
+                });
+                
+                fallbackSound.addEventListener('error', function(error) {
+                    console.error("Error loading fallback sound:", error);
+                });
+                
+                // Store the fallback sounds for later use
+                window.fallbackBreakSound = fallbackSound;
+                window.fallbackHitSound = fallbackSound.cloneNode();
+                
+                // Override the sound functions to use the fallback system
+                window.playFallbackBreakSound = function() {
+                    try {
+                        const sound = window.fallbackBreakSound.cloneNode();
+                        sound.volume = 0.5;
+                        sound.play().catch(e => console.error("Failed to play fallback break sound:", e));
+                    } catch (e) {
+                        console.error("Error with fallback break sound:", e);
+                    }
+                };
+                
+                window.playFallbackHitSound = function() {
+                    try {
+                        const sound = window.fallbackHitSound.cloneNode();
+                        sound.volume = 0.3;
+                        sound.play().catch(e => console.error("Failed to play fallback hit sound:", e));
+                    } catch (e) {
+                        console.error("Error with fallback hit sound:", e);
+                    }
+                };
+                
+                // Override the original breakObject function
+                const originalBreakObject = breakObject;
+                breakObject = function(object) {
+                    // Call the original function
+                    originalBreakObject(object);
+                    
+                    // Add fallback sound playback
+                    if (object.userData.durability && object.userData.durability > 0) {
+                        // Play hit sound
+                        window.playFallbackHitSound();
+                    } else {
+                        // Play break sound
+                        window.playFallbackBreakSound();
+                    }
+                };
+                
+                console.log("Fallback audio system initialized");
+            } catch (error) {
+                console.error("Failed to initialize fallback audio system:", error);
+            }
+        }
+        
+        function playTestSound() {
+            console.log("Playing test sound");
+            
+            if (soundEnabled && audioContext && audioContext.state === 'running') {
+                try {
+                    // Create a simple oscillator
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+                    
+                    oscillator.type = 'sine';
+                    oscillator.frequency.value = 440; // A4 note
+                    gainNode.gain.value = 0.2; // Quiet volume
+                    
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+                    
+                    // Start and stop after a short time
+                    oscillator.start();
+                    setTimeout(() => {
+                        oscillator.stop();
+                        console.log("Test sound played successfully");
+                    }, 300);
+                } catch (error) {
+                    console.error("Failed to play test sound:", error);
+                }
+            } else if (window.fallbackBreakSound) {
+                // Try playing the fallback sound
+                window.playFallbackBreakSound();
+            } else {
+                console.warn("Cannot play test sound - audio not available");
+            }
+        }
+        
+        function setupAudio() {
+            // Only set up audio after user interaction
+            if (audioListener) {
+                console.log("Audio already set up, attempting to resume context");
+                if (audioContext && audioContext.state === 'suspended') {
+                    audioContext.resume().then(() => {
+                        console.log('AudioContext resumed successfully in setupAudio');
+                        soundEnabled = true;
+                    }).catch(error => {
+                        console.error('Failed to resume AudioContext in setupAudio:', error);
+                    });
+                }
+                return; // Already set up
+            }
+            
+            console.log("Setting up audio...");
+            
+            try {
+                // Create audio context - must be after user interaction
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                console.log("AudioContext created with state:", audioContext.state);
+                
+                // Create audio listener
+                audioListener = new THREE.AudioListener();
+                camera.add(audioListener);
+                
+                // Set the audio listener's context
+                audioListener.context = audioContext;
+                
+                // Create material-specific break sounds
+                breakSounds.glass = new THREE.Audio(audioListener);
+                createGlassBreakSound(breakSounds.glass);
+                
+                breakSounds.wood = new THREE.Audio(audioListener);
+                createWoodBreakSound(breakSounds.wood);
+                
+                breakSounds.electronic = new THREE.Audio(audioListener);
+                createElectronicBreakSound(breakSounds.electronic);
+                
+                // Create material-specific hit sounds
+                hitSounds.glass = new THREE.Audio(audioListener);
+                createGlassHitSound(hitSounds.glass);
+                
+                hitSounds.wood = new THREE.Audio(audioListener);
+                createWoodHitSound(hitSounds.wood);
+                
+                hitSounds.electronic = new THREE.Audio(audioListener);
+                createElectronicHitSound(hitSounds.electronic);
+                
+                // Create ambient room sound
+                ambientSound = new THREE.Audio(audioListener);
+                createAmbientSound(ambientSound);
+                
+                // Create footstep sound
+                footstepSound = new THREE.Audio(audioListener);
+                createFootstepSound(footstepSound);
+                
+                // Check if audio context started properly
+                if (audioContext.state === 'running') {
+                    audioInitialized = true;
+                    console.log("Audio setup complete and context is running");
+                } else {
+                    console.warn("Audio setup complete but context is in state:", audioContext.state);
+                    // Try to resume the audio context immediately
+                    audioContext.resume().then(() => {
+                        audioInitialized = true;
+                        console.log('AudioContext resumed after initial setup');
+                    }).catch(error => {
+                        console.error('Failed to resume AudioContext after setup:', error);
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to setup audio:", error);
+                soundEnabled = false;
+            }
+        }
+        
+        function createGlassBreakSound(audioObject) {
+            const buffer = audioListener.context.createBuffer(1, audioListener.context.sampleRate * 0.5, audioListener.context.sampleRate);
+            const channelData = buffer.getChannelData(0);
+            
+            // Generate glass breaking sound - high pitch noise with fast decay
+            for (let i = 0; i < buffer.length; i++) {
+                const t = i / audioListener.context.sampleRate;
+                // Decay factor - glass has a quick initial crash then faster decay
+                const decay = t < 0.05 ? 1.0 : Math.exp(-t * 15);
+                
+                // Random noise with decay
+                let noise = (Math.random() * 2 - 1) * decay;
+                
+                // Add high-frequency components for glass shattering effect
+                if (i % 2 === 0) noise *= 1.5;
+                
+                // Add some "tinkling" effects randomly
+                if (Math.random() < 0.02 && t > 0.05) {
+                    noise += (Math.random() * 0.5) * Math.exp(-(t - 0.05) * 30);
+                }
+                
+                channelData[i] = noise;
+            }
+            
+            audioObject.setBuffer(buffer);
+            audioObject.setVolume(0.5);
+        }
+        
+        function createWoodBreakSound(audioObject) {
+            const buffer = audioListener.context.createBuffer(1, audioListener.context.sampleRate * 0.6, audioListener.context.sampleRate);
+            const channelData = buffer.getChannelData(0);
+            
+            // Generate wood breaking sound - lower frequency with cracks
+            for (let i = 0; i < buffer.length; i++) {
+                const t = i / audioListener.context.sampleRate;
+                
+                // Base decay
+                const decay = Math.exp(-t * 10);
+                
+                // Low frequency component for the wood "thud"
+                const baseTone = Math.sin(2 * Math.PI * 120 * t) * 0.3 * decay;
+                
+                // Noise component for the "cracking" sound
+                let crackNoise = (Math.random() * 2 - 1) * 0.7 * Math.exp(-t * 20);
+                
+                // Add some distinct crack moments
+                if ((t > 0.05 && t < 0.06) || (t > 0.12 && t < 0.14) || (t > 0.2 && t < 0.21)) {
+                    crackNoise *= 3;
+                }
+                
+                channelData[i] = baseTone + crackNoise;
+            }
+            
+            audioObject.setBuffer(buffer);
+            audioObject.setVolume(0.6);
+        }
+        
+        function createElectronicBreakSound(audioObject) {
+            const buffer = audioListener.context.createBuffer(1, audioListener.context.sampleRate * 0.7, audioListener.context.sampleRate);
+            const channelData = buffer.getChannelData(0);
+            
+            // Generate electronic breaking sound - electrical buzz with glass components
+            for (let i = 0; i < buffer.length; i++) {
+                const t = i / audioListener.context.sampleRate;
+                
+                // Base decay
+                const decay = Math.exp(-t * 8);
+                
+                // Electrical buzz component (square wave with some randomization)
+                const frequency = 60 + Math.sin(t * 50) * 30;
+                const buzz = Math.sign(Math.sin(2 * Math.PI * frequency * t)) * 0.3 * decay;
+                
+                // Glass component for the screen
+                const glassNoise = (Math.random() * 2 - 1) * 0.5 * Math.exp(-t * 15);
+                
+                // Electronic "pop" or "zap" at certain moments
+                let zap = 0;
+                if (t < 0.05) {
+                    zap = Math.sin(2 * Math.PI * 880 * t) * Math.exp(-t * 60) * 0.6;
+                }
+                if (t > 0.1 && t < 0.15) {
+                    zap += Math.sin(2 * Math.PI * 440 * t) * Math.exp(-(t-0.1) * 80) * 0.3;
+                }
+                
+                channelData[i] = buzz + glassNoise + zap;
+            }
+            
+            audioObject.setBuffer(buffer);
+            audioObject.setVolume(0.5);
+        }
+        
+        function createGlassHitSound(audioObject) {
+            const buffer = audioListener.context.createBuffer(1, audioListener.context.sampleRate * 0.2, audioListener.context.sampleRate);
+            const channelData = buffer.getChannelData(0);
+            
+            // Generate glass hit sound - high pitched ting sound
+            for (let i = 0; i < buffer.length; i++) {
+                const t = i / audioListener.context.sampleRate;
+                
+                // Main tone - glass makes a clear, high ring when hit
+                const frequency = 800 + Math.random() * 100;
+                const decay = Math.exp(-t * 30);
+                
+                // Glass "ping" sound
+                const ping = Math.sin(2 * Math.PI * frequency * t) * decay;
+                
+                // Add some noise for the impact
+                const impact = t < 0.01 ? (Math.random() * 2 - 1) * (1 - t * 100) * 0.4 : 0;
+                
+                channelData[i] = ping + impact;
+            }
+            
+            audioObject.setBuffer(buffer);
+            audioObject.setVolume(0.3);
+        }
+        
+        function createWoodHitSound(audioObject) {
+            const buffer = audioListener.context.createBuffer(1, audioListener.context.sampleRate * 0.2, audioListener.context.sampleRate);
+            const channelData = buffer.getChannelData(0);
+            
+            // Generate wood hit sound - dull thud
+            for (let i = 0; i < buffer.length; i++) {
+                const t = i / audioListener.context.sampleRate;
+                
+                // Wood has a lower pitch thud with some resonance
+                const mainFreq = 120 + Math.random() * 20;
+                const decay = Math.exp(-t * 40);
+                
+                // Dull thud component
+                const thud = Math.sin(2 * Math.PI * mainFreq * t) * decay * 0.7;
+                
+                // Add some impact noise at the start
+                const impact = t < 0.02 ? (Math.random() * 2 - 1) * (1 - t * 50) * 0.6 : 0;
+                
+                // Add some resonance frequencies
+                const resonance = Math.sin(2 * Math.PI * (mainFreq * 2.1) * t) * decay * 0.2;
+                
+                channelData[i] = thud + impact + resonance;
+            }
+            
+            audioObject.setBuffer(buffer);
+            audioObject.setVolume(0.5);
+        }
+        
+        function createElectronicHitSound(audioObject) {
+            const buffer = audioListener.context.createBuffer(1, audioListener.context.sampleRate * 0.2, audioListener.context.sampleRate);
+            const channelData = buffer.getChannelData(0);
+            
+            // Generate electronic hit sound - plastic thud with slight electrical tone
+            for (let i = 0; i < buffer.length; i++) {
+                const t = i / audioListener.context.sampleRate;
+                
+                // Plastic case impact - mid frequency thud
+                const thudFreq = 200 + Math.random() * 30;
+                const decay = Math.exp(-t * 30);
+                const thud = Math.sin(2 * Math.PI * thudFreq * t) * decay * 0.5;
+                
+                // Add impact noise
+                const impact = t < 0.01 ? (Math.random() * 2 - 1) * (1 - t * 100) * 0.4 : 0;
+                
+                // Add slight electrical hum
+                const electricHum = Math.sin(2 * Math.PI * 60 * t) * Math.exp(-t * 50) * 0.1;
+                
+                channelData[i] = thud + impact + electricHum;
+            }
+            
+            audioObject.setBuffer(buffer);
+            audioObject.setVolume(0.4);
+        }
+        
+        function createAmbientSound(audioObject) {
+            const sampleRate = audioListener.context.sampleRate;
+            const duration = 10; // 10 seconds of ambient sound that will loop
+            const buffer = audioListener.context.createBuffer(1, sampleRate * duration, sampleRate);
+            const channelData = buffer.getChannelData(0);
+            
+            // Create a subtle ambient sound
+            for (let i = 0; i < buffer.length; i++) {
+                const t = i / sampleRate;
+                
+                // Low frequency rumble/wind component
+                const lowFreq = 0.01;
+                let ambient = Math.sin(2 * Math.PI * lowFreq * t) * 0.1;
+                ambient += Math.sin(2 * Math.PI * (lowFreq * 1.5) * t) * 0.05;
+                
+                // Add slow variations
+                const slowVar = Math.sin(2 * Math.PI * 0.1 * t) * 0.05;
+                
+                // Occasional very distant sounds
+                if (Math.random() < 0.0005) {
+                    // Distant thud or creak
+                    const decayRate = 5 + Math.random() * 10;
+                    const eventDuration = sampleRate * 0.3; // 0.3 seconds
+                    if (i + eventDuration < buffer.length) {
+                        for (let j = 0; j < eventDuration; j++) {
+                            const et = j / sampleRate;
+                            const decay = Math.exp(-et * decayRate);
+                            const freq = 70 + Math.random() * 50;
+                            channelData[i + j] += Math.sin(2 * Math.PI * freq * et) * decay * 0.05;
+                        }
+                    }
+                }
+                
+                // Add some subtle noise
+                const noise = (Math.random() * 2 - 1) * 0.01;
+                
+                channelData[i] = ambient + slowVar + noise;
+            }
+            
+            // Apply overall smoothing to avoid clicks
+            const smoothingFactor = 0.05;
+            for (let i = 1; i < buffer.length - 1; i++) {
+                channelData[i] = channelData[i] * (1 - smoothingFactor * 2) + 
+                                 channelData[i - 1] * smoothingFactor + 
+                                 channelData[i + 1] * smoothingFactor;
+            }
+            
+            audioObject.setBuffer(buffer);
+            audioObject.setVolume(0.3);
+            audioObject.setLoop(true);
+        }
+        
+        function createFootstepSound(audioObject) {
+            const buffer = audioListener.context.createBuffer(1, audioListener.context.sampleRate * 0.2, audioListener.context.sampleRate);
+            const channelData = buffer.getChannelData(0);
+            
+            // Create a footstep sound - soft impact followed by a small creak
+            for (let i = 0; i < buffer.length; i++) {
+                const t = i / audioListener.context.sampleRate;
+                
+                // Initial impact - quick, soft thud
+                let impact = 0;
+                if (t < 0.02) {
+                    impact = Math.sin(2 * Math.PI * 100 * t) * Math.exp(-t * 200) * 0.6;
+                }
+                
+                // Follow-through sound - slight shuffle/creak
+                let creak = 0;
+                if (t > 0.02 && t < 0.15) {
+                    // Random noise shaped to sound like shoe movement
+                    creak = (Math.random() * 2 - 1) * 0.1 * Math.exp(-(t - 0.02) * 30);
+                    
+                    // Add some mid-frequency components for the floor creak
+                    const creakFreq = 400 + Math.sin(t * 50) * 30;
+                    creak += Math.sin(2 * Math.PI * creakFreq * t) * 0.05 * Math.exp(-(t - 0.02) * 40);
+                }
+                
+                channelData[i] = impact + creak;
+            }
+            
+            audioObject.setBuffer(buffer);
+            audioObject.setVolume(0.15); // Quiet footsteps
+        }
+        
+        function createRoom() {
+            // Floor
+            const floorGeometry = new THREE.PlaneGeometry(wallSize * 2, wallSize * 2);
+            const floorMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x808080,
+                roughness: 0.7
+            });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+            
+            // Create walls
+            const wallMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0xaaaaaa,
+                roughness: 0.5
+            });
+            
+            // Back wall
+            const backWall = new THREE.Mesh(
+                new THREE.PlaneGeometry(wallSize * 2, wallSize),
+                wallMaterial
+            );
+            backWall.position.z = -wallSize;
+            backWall.position.y = wallSize / 2;
+            backWall.receiveShadow = true;
+            scene.add(backWall);
+            
+            // Front wall
+            const frontWall = new THREE.Mesh(
+                new THREE.PlaneGeometry(wallSize * 2, wallSize),
+                wallMaterial
+            );
+            frontWall.position.z = wallSize;
+            frontWall.position.y = wallSize / 2;
+            frontWall.rotation.y = Math.PI;
+            frontWall.receiveShadow = true;
+            scene.add(frontWall);
+            
+            // Left wall
+            const leftWall = new THREE.Mesh(
+                new THREE.PlaneGeometry(wallSize * 2, wallSize),
+                wallMaterial
+            );
+            leftWall.position.x = -wallSize;
+            leftWall.position.y = wallSize / 2;
+            leftWall.rotation.y = Math.PI / 2;
+            leftWall.receiveShadow = true;
+            scene.add(leftWall);
+            
+            // Right wall
+            const rightWall = new THREE.Mesh(
+                new THREE.PlaneGeometry(wallSize * 2, wallSize),
+                wallMaterial
+            );
+            rightWall.position.x = wallSize;
+            rightWall.position.y = wallSize / 2;
+            rightWall.rotation.y = -Math.PI / 2;
+            rightWall.receiveShadow = true;
+            scene.add(rightWall);
+            
+            // Ceiling
+            const ceiling = new THREE.Mesh(
+                new THREE.PlaneGeometry(wallSize * 2, wallSize * 2),
+                wallMaterial
+            );
+            ceiling.position.y = wallSize;
+            ceiling.rotation.x = Math.PI / 2;
+            ceiling.receiveShadow = true;
+            scene.add(ceiling);
+        }
+        
+        function createBreakableObjects() {
+            // Create vases
+            for (let i = 0; i < 4; i++) {
+                createVase(
+                    Math.random() * wallSize - wallSize/2,
+                    Math.random() * 0.2 + 0.4,
+                    Math.random() * wallSize - wallSize/2
+                );
+            }
+            
+            // Create tables and chairs
+            for (let i = 0; i < 2; i++) {
+                createTable(
+                    Math.random() * (wallSize-2) - (wallSize-2)/2,
+                    0,
+                    Math.random() * (wallSize-2) - (wallSize-2)/2
+                );
+                
+                createChair(
+                    Math.random() * (wallSize-1) - (wallSize-1)/2,
+                    0,
+                    Math.random() * (wallSize-1) - (wallSize-1)/2
+                );
+            }
+            
+            // Create TVs
+            for (let i = 0; i < 1; i++) {
+                createTV(
+                    Math.random() * (wallSize-1) - (wallSize-1)/2,
+                    0.8,
+                    (Math.random() > 0.5 ? 1 : -1) * (wallSize - 0.5)
+                );
+            }
+            
+            // Create new item types
+            // Bottles - fragile glass items
+            for (let i = 0; i < 3; i++) {
+                createBottle(
+                    Math.random() * wallSize - wallSize/2,
+                    Math.random() * 0.2 + 0.6,
+                    Math.random() * wallSize - wallSize/2
+                );
+            }
+            
+            // Plates - fragile glass items
+            for (let i = 0; i < 2; i++) {
+                createPlate(
+                    Math.random() * (wallSize-1) - (wallSize-1)/2,
+                    0.6,
+                    Math.random() * (wallSize-1) - (wallSize-1)/2
+                );
+            }
+            
+            // Laptops - electronic items
+            for (let i = 0; i < 2; i++) {
+                createLaptop(
+                    Math.random() * (wallSize-2) - (wallSize-2)/2,
+                    Math.random() * 0.6 + 0.4,
+                    Math.random() * (wallSize-2) - (wallSize-2)/2
+                );
+            }
+            
+            // Shelves - sturdy wood items
+            for (let i = 0; i < 1; i++) {
+                createShelf(
+                    (Math.random() > 0.5 ? 1 : -1) * (wallSize - 0.5),
+                    0.6,
+                    Math.random() * (wallSize-2) - (wallSize-2)/2
+                );
+            }
+            
+            // Lamps - mixed material items
+            for (let i = 0; i < 2; i++) {
+                createLamp(
+                    Math.random() * (wallSize-2) - (wallSize-2)/2,
+                    0,
+                    Math.random() * (wallSize-2) - (wallSize-2)/2
+                );
+            }
+        }
+        
+        function createVase(x, y, z) {
+            const geometry = new THREE.CylinderGeometry(0.15, 0.1, 0.3, 16);
+            const material = new THREE.MeshStandardMaterial({
+                color: Math.random() > 0.5 ? 0x6495ED : 0x9370DB,
+                roughness: 0.2,
+                metalness: 0.1
+            });
+            const vase = new THREE.Mesh(geometry, material);
+            vase.position.set(x, y, z);
+            vase.castShadow = true;
+            vase.receiveShadow = true;
+            vase.userData = { 
+                type: 'glass', 
+                value: 10,
+                maxDurability: 1,
+                durability: 1  // Glass vases are fragile, break in 1 hit
+            };
+            console.log("Created vase with durability:", vase.userData.durability);
+            scene.add(vase);
+            breakableObjects.push(vase);
+        }
+        
+        function createTable(x, y, z) {
+            // Table top
+            const tableTopGeometry = new THREE.BoxGeometry(0.8, 0.05, 0.8);
+            const tableMaterial = new THREE.MeshStandardMaterial({
+                color: 0x8B4513,
+                roughness: 0.8
+            });
+            const tableTop = new THREE.Mesh(tableTopGeometry, tableMaterial);
+            tableTop.position.set(x, y + 0.45, z);
+            tableTop.castShadow = true;
+            tableTop.receiveShadow = true;
+            
+            // Table legs
+            const legGeometry = new THREE.BoxGeometry(0.05, 0.9, 0.05);
+            const leg1 = new THREE.Mesh(legGeometry, tableMaterial);
+            leg1.position.set(x + 0.35, y + 0.45/2, z + 0.35);
+            leg1.castShadow = true;
+            
+            const leg2 = new THREE.Mesh(legGeometry, tableMaterial);
+            leg2.position.set(x + 0.35, y + 0.45/2, z - 0.35);
+            leg2.castShadow = true;
+            
+            const leg3 = new THREE.Mesh(legGeometry, tableMaterial);
+            leg3.position.set(x - 0.35, y + 0.45/2, z + 0.35);
+            leg3.castShadow = true;
+            
+            const leg4 = new THREE.Mesh(legGeometry, tableMaterial);
+            leg4.position.set(x - 0.35, y + 0.45/2, z - 0.35);
+            leg4.castShadow = true;
+            
+            // Create a group for the table
+            const table = new THREE.Group();
+            table.add(tableTop, leg1, leg2, leg3, leg4);
+            table.userData = { 
+                type: 'wood', 
+                value: 25,
+                maxDurability: 4,
+                durability: 4  // Tables are sturdiest, need 4 hits
+            };
+            console.log("Created table with durability:", table.userData.durability);
+            scene.add(table);
+            breakableObjects.push(table);
+        }
+        
+        function createChair(x, y, z) {
+            const chairMaterial = new THREE.MeshStandardMaterial({
+                color: 0xA0522D,
+                roughness: 0.9
+            });
+            
+            // Chair seat
+            const seatGeometry = new THREE.BoxGeometry(0.5, 0.05, 0.5);
+            const seat = new THREE.Mesh(seatGeometry, chairMaterial);
+            seat.position.set(x, y + 0.25, z);
+            seat.castShadow = true;
+            
+            // Chair legs
+            const legGeometry = new THREE.BoxGeometry(0.05, 0.5, 0.05);
+            const leg1 = new THREE.Mesh(legGeometry, chairMaterial);
+            leg1.position.set(x + 0.2, y + 0.25/2, z + 0.2);
+            leg1.castShadow = true;
+            
+            const leg2 = new THREE.Mesh(legGeometry, chairMaterial);
+            leg2.position.set(x + 0.2, y + 0.25/2, z - 0.2);
+            leg2.castShadow = true;
+            
+            const leg3 = new THREE.Mesh(legGeometry, chairMaterial);
+            leg3.position.set(x - 0.2, y + 0.25/2, z + 0.2);
+            leg3.castShadow = true;
+            
+            const leg4 = new THREE.Mesh(legGeometry, chairMaterial);
+            leg4.position.set(x - 0.2, y + 0.25/2, z - 0.2);
+            leg4.castShadow = true;
+            
+            // Chair back
+            const backGeometry = new THREE.BoxGeometry(0.5, 0.4, 0.05);
+            const back = new THREE.Mesh(backGeometry, chairMaterial);
+            back.position.set(x, y + 0.45, z - 0.25);
+            back.castShadow = true;
+            
+            // Create a group for the chair
+            const chair = new THREE.Group();
+            chair.add(seat, leg1, leg2, leg3, leg4, back);
+            chair.userData = { 
+                type: 'wood', 
+                value: 15,
+                maxDurability: 2,
+                durability: 2  // Chairs need 2 hits
+            };
+            scene.add(chair);
+            breakableObjects.push(chair);
+        }
+        
+        function createTV(x, y, z) {
+            // TV Screen
+            const screenGeometry = new THREE.BoxGeometry(0.8, 0.5, 0.1);
+            const screenMaterial = new THREE.MeshStandardMaterial({
+                color: 0x000000,
+                roughness: 0.1,
+                metalness: 0.8
+            });
+            const screen = new THREE.Mesh(screenGeometry, screenMaterial);
+            screen.position.set(x, y + 0.6, z);
+            
+            // If TV is on a wall, rotate it
+            if (Math.abs(z) > wallSize - 1) {
+                screen.rotation.y = z > 0 ? Math.PI : 0;
+            }
+            
+            screen.castShadow = true;
+            
+            // TV Stand
+            const standGeometry = new THREE.BoxGeometry(0.3, 0.2, 0.3);
+            const standMaterial = new THREE.MeshStandardMaterial({
+                color: 0x2F4F4F,
+                roughness: 0.5
+            });
+            const stand = new THREE.Mesh(standGeometry, standMaterial);
+            
+            // Adjust stand position based on TV location
+            if (Math.abs(z) > wallSize - 1) {
+                // TV is on a wall
+                stand.position.set(x, y + 0.1, z + (z > 0 ? -0.2 : 0.2));
+            } else {
+                // TV is free-standing
+                stand.position.set(x, y + 0.1, z);
+            }
+            
+            stand.castShadow = true;
+            
+            // Create a group for the TV
+            const tv = new THREE.Group();
+            tv.add(screen, stand);
+            tv.userData = { 
+                type: 'electronic', 
+                value: 35,
+                maxDurability: 3,
+                durability: 3  // TVs need 3 hits
+            };
+            scene.add(tv);
+            breakableObjects.push(tv);
+        }
+        
+        function createBottle(x, y, z) {
+            // Create bottle body
+            const bodyGeometry = new THREE.CylinderGeometry(0.08, 0.1, 0.3, 16);
+            const neckGeometry = new THREE.CylinderGeometry(0.03, 0.08, 0.1, 16);
+            
+            // Create material with glass-like appearance
+            const bottleColor = Math.random() > 0.5 ? 0x2E8B57 : 0x8A2BE2; // Green or purple
+            const bottleMaterial = new THREE.MeshStandardMaterial({
+                color: bottleColor,
+                roughness: 0.2,
+                metalness: 0.1,
+                transparent: true,
+                opacity: 0.8
+            });
+            
+            const body = new THREE.Mesh(bodyGeometry, bottleMaterial);
+            const neck = new THREE.Mesh(neckGeometry, bottleMaterial);
+            
+            // Position neck relative to body
+            neck.position.y = 0.2;
+            
+            // Create a group for the bottle
+            const bottle = new THREE.Group();
+            bottle.add(body, neck);
+            bottle.position.set(x, y, z);
+            
+            // Rotate bottle randomly for variation
+            bottle.rotation.y = Math.random() * Math.PI * 2;
+            
+            bottle.userData = { 
+                type: 'glass', 
+                value: 15,
+                maxDurability: 1,
+                durability: 1  // Bottles are fragile, break in 1 hit
+            };
+            
+            scene.add(bottle);
+            breakableObjects.push(bottle);
+        }
+        
+        function createPlate(x, y, z) {
+            // Create plate geometry - flattened cylinder
+            const plateGeometry = new THREE.CylinderGeometry(0.2, 0.2, 0.02, 24);
+            
+            // Create ceramic-like material
+            const plateColor = Math.random() > 0.3 ? 0xFFFFFF : 0xB0E0E6; // White or light blue
+            const plateMaterial = new THREE.MeshStandardMaterial({
+                color: plateColor,
+                roughness: 0.4,
+                metalness: 0.1
+            });
+            
+            const plate = new THREE.Mesh(plateGeometry, plateMaterial);
+            plate.position.set(x, y, z);
+            
+            // Rotate plate to be horizontal and add slight tilt for realism
+            plate.rotation.x = Math.PI / 2 + (Math.random() - 0.5) * 0.2;
+            plate.rotation.z = Math.random() * Math.PI * 2;
+            
+            plate.castShadow = true;
+            plate.receiveShadow = true;
+            
+            plate.userData = { 
+                type: 'glass', // Ceramic/porcelain is most similar to glass in terms of breaking
+                value: 12,
+                maxDurability: 1,
+                durability: 1  // Plates are fragile
+            };
+            
+            scene.add(plate);
+            breakableObjects.push(plate);
+        }
+        
+        function createLaptop(x, y, z) {
+            // Create laptop base and screen
+            const baseGeometry = new THREE.BoxGeometry(0.4, 0.02, 0.3);
+            const screenGeometry = new THREE.BoxGeometry(0.38, 0.25, 0.01);
+            
+            // Create materials
+            const baseMaterial = new THREE.MeshStandardMaterial({
+                color: 0x444444,
+                roughness: 0.5,
+                metalness: 0.7
+            });
+            
+            const screenMaterial = new THREE.MeshStandardMaterial({
+                color: 0x111111,
+                roughness: 0.1,
+                metalness: 0.8
+            });
+            
+            const base = new THREE.Mesh(baseGeometry, baseMaterial);
+            const screen = new THREE.Mesh(screenGeometry, screenMaterial);
+            
+            // Position screen relative to base
+            screen.position.y = 0.12;
+            screen.position.z = -0.14;
+            screen.rotation.x = Math.PI / 4; // Tilt screen for realistic look
+            
+            // Create a group for the laptop
+            const laptop = new THREE.Group();
+            laptop.add(base, screen);
+            laptop.position.set(x, y, z);
+            
+            // Rotate laptop randomly for variation
+            laptop.rotation.y = Math.random() * Math.PI * 2;
+            
+            laptop.castShadow = true;
+            laptop.receiveShadow = true;
+            
+            laptop.userData = { 
+                type: 'electronic', 
+                value: 40,
+                maxDurability: 2,
+                durability: 2  // Laptops need 2 hits to break
+            };
+            
+            scene.add(laptop);
+            breakableObjects.push(laptop);
+        }
+        
+        function createShelf(x, y, z) {
+            // Create shelf board
+            const shelfGeometry = new THREE.BoxGeometry(1.2, 0.04, 0.3);
+            const shelfMaterial = new THREE.MeshStandardMaterial({
+                color: 0x8B4513,
+                roughness: 0.8
+            });
+            
+            const shelf = new THREE.Mesh(shelfGeometry, shelfMaterial);
+            
+            // Create brackets
+            const bracketGeometry = new THREE.BoxGeometry(0.05, 0.2, 0.25);
+            const bracket1 = new THREE.Mesh(bracketGeometry, shelfMaterial);
+            bracket1.position.set(-0.5, -0.1, 0);
+            
+            const bracket2 = new THREE.Mesh(bracketGeometry, shelfMaterial);
+            bracket2.position.set(0.5, -0.1, 0);
+            
+            // Add a few items on the shelf for extra effect
+            const bookGeometry = new THREE.BoxGeometry(0.1, 0.2, 0.15);
+            const bookMaterial = new THREE.MeshStandardMaterial({
+                color: Math.random() > 0.5 ? 0x8B0000 : 0x006400,
+                roughness: 0.7
+            });
+            
+            const book = new THREE.Mesh(bookGeometry, bookMaterial);
+            book.position.set(-0.3, 0.12, 0);
+            
+            // Create a small decorative object
+            const decoGeometry = new THREE.SphereGeometry(0.06, 8, 8);
+            const decoMaterial = new THREE.MeshStandardMaterial({
+                color: 0xFFD700,
+                roughness: 0.3,
+                metalness: 0.7
+            });
+            
+            const deco = new THREE.Mesh(decoGeometry, decoMaterial);
+            deco.position.set(0.2, 0.08, 0);
+            
+            // Create a group for the shelf
+            const shelfUnit = new THREE.Group();
+            shelfUnit.add(shelf, bracket1, bracket2, book, deco);
+            
+            // Position the shelf against a wall
+            shelfUnit.position.set(x, y, z);
+            
+            // If shelf is on a wall, rotate it to face inward
+            if (Math.abs(x) > wallSize - 1) {
+                shelfUnit.rotation.y = x > 0 ? Math.PI / 2 : -Math.PI / 2;
+            }
+            
+            shelfUnit.castShadow = true;
+            shelfUnit.receiveShadow = true;
+            
+            shelfUnit.userData = { 
+                type: 'wood', 
+                value: 35,
+                maxDurability: 3,
+                durability: 3  // Shelves need 3 hits to break
+            };
+            
+            scene.add(shelfUnit);
+            breakableObjects.push(shelfUnit);
+        }
+        
+        function createLamp(x, y, z) {
+            // Create lamp base
+            const baseGeometry = new THREE.CylinderGeometry(0.15, 0.2, 0.05, 16);
+            const baseMaterial = new THREE.MeshStandardMaterial({
+                color: 0x404040,
+                roughness: 0.5,
+                metalness: 0.7
+            });
+            const base = new THREE.Mesh(baseGeometry, baseMaterial);
+            base.position.y = 0.025;
+            
+            // Create lamp pole
+            const poleGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.7, 8);
+            const poleMaterial = new THREE.MeshStandardMaterial({
+                color: 0x808080,
+                roughness: 0.3,
+                metalness: 0.8
+            });
+            const pole = new THREE.Mesh(poleGeometry, poleMaterial);
+            pole.position.y = 0.4;
+            
+            // Create lamp shade
+            const shadeGeometry = new THREE.ConeGeometry(0.2, 0.3, 16, 1, true);
+            
+            // Random lamp shade color
+            const lampColors = [0xF5DEB3, 0xFFE4C4, 0xFFDAB9, 0xFAF0E6];
+            const randomColor = lampColors[Math.floor(Math.random() * lampColors.length)];
+            
+            const shadeMaterial = new THREE.MeshStandardMaterial({
+                color: randomColor,
+                roughness: 0.7,
+                side: THREE.DoubleSide
+            });
+            
+            const shade = new THREE.Mesh(shadeGeometry, shadeMaterial);
+            shade.position.y = 0.7;
+            shade.rotation.x = Math.PI;
+            
+            // Create a small light bulb inside the shade
+            const bulbGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+            const bulbMaterial = new THREE.MeshBasicMaterial({
+                color: 0xFFFFCC,
+                transparent: true,
+                opacity: 0.9
+            });
+            
+            const bulb = new THREE.Mesh(bulbGeometry, bulbMaterial);
+            bulb.position.y = 0.65;
+            
+            // Add a small point light
+            const lampLight = new THREE.PointLight(0xFFFFCC, 0.5, 2);
+            lampLight.position.y = 0.65;
+            
+            // Create a group for the lamp
+            const lamp = new THREE.Group();
+            lamp.add(base, pole, shade, bulb, lampLight);
+            lamp.position.set(x, y, z);
+            
+            lamp.castShadow = true;
+            lamp.receiveShadow = true;
+            
+            lamp.userData = { 
+                type: 'mixed', // This will be handled specially
+                value: 30,
+                maxDurability: 2,
+                durability: 2  // Lamps need 2 hits to break
+            };
+            
+            scene.add(lamp);
+            breakableObjects.push(lamp);
+        }
+        
+        function createLights() {
+            // Ambient light
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+            scene.add(ambientLight);
+            
+            // Ceiling light
+            const mainLight = new THREE.PointLight(0xffffff, 0.7, 20);
+            mainLight.position.set(0, wallSize - 0.5, 0);
+            mainLight.castShadow = true;
+            mainLight.shadow.mapSize.width = 1024;
+            mainLight.shadow.mapSize.height = 1024;
+            scene.add(mainLight);
+            
+            // Add some additional lights in corners
+            const cornerLight1 = new THREE.PointLight(0xffffcc, 0.3, 15);
+            cornerLight1.position.set(wallSize/2 - 1, wallSize/2, wallSize/2 - 1);
+            scene.add(cornerLight1);
+            
+            const cornerLight2 = new THREE.PointLight(0xffffcc, 0.3, 15);
+            cornerLight2.position.set(-wallSize/2 + 1, wallSize/2, -wallSize/2 + 1);
+            scene.add(cornerLight2);
+        }
+        
+        function setupControls() {
+            // Lock controls
+            const container = document.getElementById('game-container');
+            
+            container.addEventListener('click', function() {
+                container.requestPointerLock = container.requestPointerLock ||
+                                            container.mozRequestPointerLock ||
+                                            container.webkitRequestPointerLock;
+                if (gameActive) {
+                    container.requestPointerLock();
+                }
+            });
+            
+            // Set up pointer lock event listeners
+            document.addEventListener('pointerlockchange', lockChangeAlert, false);
+            document.addEventListener('mozpointerlockchange', lockChangeAlert, false);
+            document.addEventListener('webkitpointerlockchange', lockChangeAlert, false);
+            
+            function lockChangeAlert() {
+                if (document.pointerLockElement === container ||
+                    document.mozPointerLockElement === container ||
+                    document.webkitPointerLockElement === container) {
+                    document.addEventListener('mousemove', updateCamera, false);
+                    document.addEventListener('keydown', onKeyDown, false);
+                    document.addEventListener('keyup', onKeyUp, false);
+                } else {
+                    document.removeEventListener('mousemove', updateCamera, false);
+                    document.removeEventListener('keydown', onKeyDown, false);
+                    document.removeEventListener('keyup', onKeyUp, false);
+                }
+            }
+            
+            // Camera control with mouse
+            function updateCamera(e) {
+                const movementX = e.movementX || e.mozMovementX || e.webkitMovementX || 0;
+                const movementY = e.movementY || e.mozMovementY || e.webkitMovementY || 0;
+                
+                // Sensitivity adjustment
+                const sensitivity = 0.003;
+                
+                // SIMPLIFIED APPROACH: Using YXZ rotation order for proper FPS camera
+                
+                // Update Y rotation (horizontal look - turn left/right)
+                camera.userData.horizontalAngle -= movementX * sensitivity;
+                
+                // Update X rotation (vertical look - look up/down)
+                camera.userData.verticalAngle -= movementY * sensitivity;
+                
+                // Clamp vertical angle to prevent flipping
+                camera.userData.verticalAngle = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, camera.userData.verticalAngle));
+                
+                // Apply rotations directly with YXZ order (this prevents Z-rotation issues)
+                camera.rotation.y = camera.userData.horizontalAngle;
+                camera.rotation.x = camera.userData.verticalAngle;
+                
+                // EXPLICITLY force Z rotation to be exactly zero
+                camera.rotation.z = 0;
+                
+                // Update vertical look angle for other functions
+                verticalLookAngle = camera.userData.verticalAngle;
+            }
+            
+            // Keyboard controls for movement
+            function onKeyDown(event) {
+                switch (event.keyCode) {
+                    case 87: // W
+                        moveForward = true;
+                        break;
+                    case 83: // S
+                        moveBackward = true;
+                        break;
+                    case 65: // A
+                        moveLeft = true;
+                        break;
+                    case 68: // D
+                        moveRight = true;
+                        break;
+                }
+            }
+            
+            function onKeyUp(event) {
+                switch (event.keyCode) {
+                    case 87: // W
+                        moveForward = false;
+                        break;
+                    case 83: // S
+                        moveBackward = false;
+                        break;
+                    case 65: // A
+                        moveLeft = false;
+                        break;
+                    case 68: // D
+                        moveRight = false;
+                        break;
+                }
+            }
+        }
+        
+        function onMouseClick(event) {
+            if (!gameActive) return;
+            
+            console.log("Mouse clicked");
+            
+            // Always try to resume AudioContext on user click
+            if (audioContext) {
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume().then(() => {
+                        console.log('AudioContext resumed on click, state:', audioContext.state);
+                        soundEnabled = true;
+                        
+                        // Try playing a test sound
+                        if (breakSounds.wood) {
+                            try {
+                                const testSound = breakSounds.wood.clone();
+                                testSound.setVolume(0.2);
+                                testSound.play();
+                                console.log("Test sound played successfully");
+                            } catch (e) {
+                                console.error("Failed to play test sound:", e);
+                            }
+                        }
+                        
+                    }).catch(error => {
+                        console.error('Failed to resume AudioContext:', error);
+                    });
+                } else {
+                    console.log('AudioContext already in state:', audioContext.state);
+                }
+            } else if (!audioInitialized) {
+                // If audio wasn't initialized yet, try to set it up now
+                console.log("Attempting to initialize audio on click");
+                setupAudio();
+            }
+            
+            // Create a direction vector for the center of the screen
+            const direction = new THREE.Vector3(0, 0, -1);
+            
+            // Apply the camera's rotation to the direction vector
+            direction.applyQuaternion(camera.quaternion);
+            
+            // Set raycaster using camera position and the calculated direction
+            raycaster.set(camera.position, direction.normalize());
+            
+            // Find intersections with breakable objects
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            console.log("Total intersected objects:", intersects.length);
+            
+            if (intersects.length > 0) {
+                // Find the closest object that is or belongs to a breakable object
+                let targetObject = null;
+                
+                for (let i = 0; i < intersects.length; i++) {
+                    let obj = intersects[i].object;
+                    console.log(`Checking object ${i}:`, obj.name || obj.type || "unnamed");
+                    
+                    // Check if this object is directly in breakableObjects
+                    if (breakableObjects.includes(obj)) {
+                        targetObject = obj;
+                        console.log("Found direct breakable object:", obj);
+                        break;
+                    }
+                    
+                    // Check if any parent is in breakableObjects
+                    let parent = obj.parent;
+                    while (parent) {
+                        if (breakableObjects.includes(parent)) {
+                            targetObject = parent;
+                            console.log("Found breakable parent:", parent);
+                            break;
+                        }
+                        parent = parent.parent;
+                    }
+                    
+                    if (targetObject) break;
+                }
+                
+                if (targetObject) {
+                    console.log("Breaking object:", targetObject.userData);
+                    breakObject(targetObject);
+                } else {
+                    console.log("No breakable object found in intersection results");
+                }
+            } else {
+                console.log("No object hit");
+            }
+        }
+        
+        function breakObject(object) {
+            console.log("Breaking object with durability:", object.userData.durability);
+            console.log("Object type:", object.userData.type, "Object value:", object.userData.value);
+            
+            // First ensure userData exists to prevent errors
+            if (!object.userData) {
+                console.error("Object is missing userData");
+                return;
+            }
+            
+            // Check for durability property
+            if (!object.userData.hasOwnProperty('durability')) {
+                console.error("Object is missing durability property");
+                return;
+            }
+            
+            // Check if object has durability
+            if (object.userData.durability && object.userData.durability > 1) {
+                // Reduce durability by 1
+                object.userData.durability--;
+                console.log("Reduced durability to:", object.userData.durability, 
+                            "of", object.userData.maxDurability);
+                
+                // Play hit sound based on material type
+                if (soundEnabled && audioContext) {
+                    // Even if not running, try to resume it
+                    if (audioContext.state !== 'running') {
+                        console.log("Audio context not running, attempting to resume");
+                        audioContext.resume().catch(e => console.error("Failed to resume audio context:", e));
+                    }
+                    
+                    try {
+                        // Select the appropriate hit sound based on the object type
+                        let soundType = object.userData.type || 'wood'; // Default to wood if not specified
+                        
+                        // Handle mixed material type (for lamps - use different sounds based on hit)
+                        if (soundType === 'mixed') {
+                            // First hit damages the shade (glass-like), second hit damages the base (wood/metal)
+                            soundType = object.userData.durability === 1 ? 'wood' : 'glass';
+                        }
+                        
+                        let sound = hitSounds[soundType] || hitSounds.wood; // Default to wood if type not found
+                        
+                        // Clone the sound to allow overlapping
+                        if (sound) {
+                            console.log(`Attempting to play ${soundType} hit sound`);
+                            
+                            const soundClone = sound.clone();
+                            
+                            // Modify sound based on damage level (closer to breaking = more intense sound)
+                            const damageRatio = object.userData.durability / object.userData.maxDurability;
+                            
+                            // Lower pitch and increase volume as object gets more damaged
+                            const pitchFactor = 0.8 + damageRatio * 0.4; // 0.8-1.2 range
+                            const volumeFactor = 1.0 + (1.0 - damageRatio) * 0.5; // 1.0-1.5 range
+                            
+                            soundClone.setPlaybackRate(pitchFactor);
+                            soundClone.setVolume(sound.getVolume() * volumeFactor);
+                            
+                            // Add distortion for almost-broken objects
+                            if (object.userData.durability === 1) {
+                                // This is the final hit before breaking - make it sound more stressed
+                                soundClone.setPlaybackRate(pitchFactor * 0.8); // Even lower pitch
+                                soundClone.setVolume(sound.getVolume() * 1.8); // Louder
+                            }
+                            
+                            soundClone.play();
+                            console.log(`Playing ${soundType} hit sound (damage ratio: ${damageRatio.toFixed(2)})`);
+                        } else {
+                            console.warn(`No ${soundType} hit sound found`);
+                        }
+                    } catch (error) {
+                        console.warn("Failed to play hit sound:", error);
+                    }
+                } else {
+                    console.warn("Sound disabled or audio context not available");
+                }
+                
+                // Visual feedback - create a small particle effect
+                createParticles(object.position.clone(), object.userData.type, 5);
+                
+                // Show damage indicator
+                showDamageIndicator(object.position, object.userData.durability);
+                
+                // Change the object color to show damage
+                if (object.material) {
+                    // For single mesh objects
+                    const damageColor = new THREE.Color(
+                        Math.max(0.3, object.material.color.r * 0.8),
+                        Math.max(0.3, object.material.color.g * 0.8),
+                        Math.max(0.3, object.material.color.b * 0.8)
+                    );
+                    object.material.color.set(damageColor);
+                    console.log("Changed color of single mesh object");
+                } else {
+                    // For group objects, apply to all children
+                    object.traverse(child => {
+                        if (child.material) {
+                            // Darken the color based on damage level
+                            const damageRatio = object.userData.durability / object.userData.maxDurability;
+                            child.material.color.multiplyScalar(0.9);
+                            console.log("Changed color of child mesh in group");
+                        }
+                    });
+                }
+                
+                // Create more particles for heavily damaged objects
+                if (object.userData.durability === 1) {
+                    // Create additional particles to show it's about to break
+                    createParticles(object.position.clone(), object.userData.type, 8);
+                    
+                    // Vibrate the object slightly to show instability
+                    if (object.position) {
+                        const originalPosition = object.position.clone();
+                        
+                        // Small shake animation
+                        const shakeDuration = 300; // ms
+                        const startTime = performance.now();
+                        
+                        function shakeObject() {
+                            const elapsed = performance.now() - startTime;
+                            if (elapsed < shakeDuration) {
+                                // Apply random small offset
+                                const intensity = 0.02 * (1 - elapsed / shakeDuration);
+                                object.position.set(
+                                    originalPosition.x + (Math.random() - 0.5) * intensity,
+                                    originalPosition.y + (Math.random() - 0.5) * intensity,
+                                    originalPosition.z + (Math.random() - 0.5) * intensity
+                                );
+                                requestAnimationFrame(shakeObject);
+                            } else {
+                                // Reset to original position
+                                object.position.copy(originalPosition);
+                            }
+                        }
+                        
+                        shakeObject();
+                    }
+                }
+                
+                // Show hit marker on crosshair
+                const crosshair = document.getElementById('crosshair');
+                if (crosshair.classList) {
+                    crosshair.classList.add('target');
+                    setTimeout(() => crosshair.classList.remove('target'), 100);
+                }
+                
+                // Add small score for damaging
+                score += Math.floor(object.userData.value * 0.2);
+                document.getElementById('score').textContent = `Score: ${score}`;
+                
+                return; // Don't fully break the object yet
+            }
+            
+            console.log("Object breaking completely");
+            // Play break sound based on material type
+            if (soundEnabled && audioContext) {
+                // Try to resume context if needed
+                if (audioContext.state !== 'running') {
+                    console.log("Audio context not running for break sound, attempting to resume");
+                    audioContext.resume().catch(e => console.error("Failed to resume audio context:", e));
+                }
+                
+                try {
+                    // Select the appropriate break sound based on the object type
+                    let soundType = object.userData.type || 'wood'; // Default to wood if not specified
+                    
+                    // Handle mixed material type
+                    if (soundType === 'mixed') {
+                        // For lamps, use electronic break sound (for the electrical components)
+                        soundType = 'electronic';
+                    }
+                    
+                    let sound = breakSounds[soundType] || breakSounds.wood; // Default to wood if type not found
+                    
+                    // Clone the sound to allow overlapping
+                    if (sound) {
+                        console.log(`Attempting to play ${soundType} break sound`);
+                        
+                        const soundClone = sound.clone();
+                        
+                        // Make the final break sound more impactful
+                        soundClone.setVolume(sound.getVolume() * 1.5);
+                        
+                        // Randomize the playback rate slightly for variety
+                        soundClone.setPlaybackRate(0.9 + Math.random() * 0.2);
+                        
+                        soundClone.play();
+                        console.log(`Playing ${soundType} break sound`);
+                    } else {
+                        console.warn(`No ${soundType} break sound found`);
+                    }
+                } catch (error) {
+                    console.warn("Failed to play break sound:", error);
+                }
+            } else {
+                console.warn("Sound disabled or audio context not available for break sound");
+            }
+            
+            // Show hit marker on crosshair
+            const crosshair = document.getElementById('crosshair');
+            if (crosshair.classList) {
+                crosshair.classList.add('target');
+                setTimeout(() => crosshair.classList.remove('target'), 100);
+            }
+            
+            // Remove from scene
+            scene.remove(object);
+            
+            // Remove from breakable objects array
+            const index = breakableObjects.indexOf(object);
+            if (index > -1) {
+                breakableObjects.splice(index, 1);
+            }
+            
+            // Create particle effect at object's position
+            createParticles(object.position.clone(), object.userData.type);
+            
+            // Update score
+            score += object.userData.value || 10;
+            document.getElementById('score').textContent = `Score: ${score}`;
+            
+            // Add new object to replace broken one (to keep game going)
+            if (breakableObjects.length < 5 && gameActive) {
+                const type = Math.random();
+                const x = Math.random() * (wallSize-2) - (wallSize-2)/2;
+                const z = Math.random() * (wallSize-2) - (wallSize-2)/2;
+                
+                if (type < 0.15) {
+                    createVase(x, 0.4, z);
+                } else if (type < 0.3) {
+                    createBottle(x, 0.6, z);
+                } else if (type < 0.45) {
+                    createPlate(x, 0.6, z);
+                } else if (type < 0.6) {
+                    createChair(x, 0, z);
+                } else if (type < 0.75) {
+                    createTable(x, 0, z);
+                } else if (type < 0.85) {
+                    createLaptop(x, 0.6, z);
+                } else if (type < 0.95) {
+                    createLamp(x, 0, z);
+                } else {
+                    createTV(x, 0.8, z);
+                }
+            }
+        }
+        
+        function createParticles(position, type, customCount = null) {
+            // Define particle properties based on type
+            let color, size, count;
+            
+            if (type === 'glass') {
+                color = 0x6495ED;
+                size = 0.03;
+                count = 30;
+            } else if (type === 'wood') {
+                color = 0x8B4513;
+                size = 0.05;
+                count = 20;
+            } else if (type === 'electronic') {
+                color = 0x333333;
+                size = 0.04;
+                count = 25;
+            } else if (type === 'mixed') {
+                // For mixed objects like lamps, create a mix of particle types
+                // First create glass-like particles
+                createParticles(position.clone(), 'glass', customCount ? Math.floor(customCount/2) : null);
+                // Then create electronic-like particles
+                color = 0x777777;
+                size = 0.04;
+                count = 15;
+            } else {
+                color = 0xFFFFFF;
+                size = 0.04;
+                count = 20;
+            }
+            
+            // Use custom count if provided
+            if (customCount !== null) {
+                count = customCount;
+            }
+            
+            // Create particle geometry
+            const particles = new THREE.BufferGeometry();
+            const positions = [];
+            const velocities = [];
+            
+            for (let i = 0; i < count; i++) {
+                // Randomize position slightly around the object center
+                const x = position.x + (Math.random() - 0.5) * 0.3;
+                const y = position.y + (Math.random() - 0.5) * 0.3;
+                const z = position.z + (Math.random() - 0.5) * 0.3;
+                
+                positions.push(x, y, z);
+                
+                // Random velocity for each particle
+                const vx = (Math.random() - 0.5) * 0.1;
+                const vy = Math.random() * 0.05 + 0.01;
+                const vz = (Math.random() - 0.5) * 0.1;
+                
+                velocities.push(vx, vy, vz);
+            }
+            
+            particles.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            
+            // Create particle material
+            const particleMaterial = new THREE.PointsMaterial({
+                color: color,
+                size: size,
+                transparent: true,
+                opacity: 0.8
+            });
+            
+            // Create particle system
+            const particleSystem = new THREE.Points(particles, particleMaterial);
+            particleSystem.userData = { 
+                velocities: velocities,
+                lifetime: 0,
+                maxLifetime: 60
+            };
+            
+            scene.add(particleSystem);
+            
+            // Store in a separate array to animate them
+            if (!window.particleSystems) {
+                window.particleSystems = [];
+            }
+            window.particleSystems.push(particleSystem);
+        }
+        
+        function updateParticles() {
+            if (!window.particleSystems) return;
+            
+            for (let i = window.particleSystems.length - 1; i >= 0; i--) {
+                const ps = window.particleSystems[i];
+                ps.userData.lifetime++;
+                
+                // Remove if lifetime exceeded
+                if (ps.userData.lifetime >= ps.userData.maxLifetime) {
+                    scene.remove(ps);
+                    window.particleSystems.splice(i, 1);
+                    continue;
+                }
+                
+                // Update each particle position
+                const positions = ps.geometry.attributes.position.array;
+                const velocities = ps.userData.velocities;
+                
+                for (let j = 0; j < positions.length; j += 3) {
+                    positions[j] += velocities[j]; // x
+                    positions[j+1] += velocities[j+1]; // y
+                    positions[j+2] += velocities[j+2]; // z
+                    
+                    // Apply slight gravity
+                    velocities[j+1] -= 0.001;
+                }
+                
+                ps.geometry.attributes.position.needsUpdate = true;
+                
+                // Fade out
+                const opacity = 1 - (ps.userData.lifetime / ps.userData.maxLifetime);
+                ps.material.opacity = opacity;
+            }
+        }
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        function updateGameTimer() {
+            if (!gameActive) return;
+            
+            timeRemaining--;
+            document.getElementById('timer').textContent = `Time: ${timeRemaining}s`;
+            
+            if (timeRemaining <= 0) {
+                endGame();
+            }
+        }
+        
+        function startGame() {
+            score = 0;
+            timeRemaining = 60;
+            document.getElementById('score').textContent = `Score: ${score}`;
+            document.getElementById('timer').textContent = `Time: ${timeRemaining}s`;
+            
+            // Hide start screen
+            document.getElementById('start-screen').style.display = 'none';
+            document.getElementById('end-screen').style.display = 'none';
+            
+            console.log("Starting game, initializing audio...");
+            
+            // Set up audio - after user interaction
+            setupAudio();
+            
+            // Extra check to ensure the audio context is running
+            if (audioContext) {
+                console.log("Audio context state before resuming:", audioContext.state);
+                
+                // Always attempt to resume the audio context
+                audioContext.resume().then(() => {
+                    console.log('AudioContext resumed successfully, state is now:', audioContext.state);
+                    
+                    // Start ambient sound
+                    if (ambientSound && !ambientSound.isPlaying && soundEnabled) {
+                        try {
+                            ambientSound.play();
+                            console.log('Ambient sound started');
+                        } catch (error) {
+                            console.error('Failed to play ambient sound:', error);
+                        }
+                    }
+                }).catch(error => {
+                    console.error('Failed to resume AudioContext:', error);
+                });
+            } else {
+                console.warn("Audio context not created yet");
+            }
+            
+            // Set game active
+            gameActive = true;
+            
+            // Start timer
+            gameTimer = setInterval(updateGameTimer, 1000);
+            
+            // Request pointer lock
+            const container = document.getElementById('game-container');
+            container.requestPointerLock = container.requestPointerLock ||
+                                        container.mozRequestPointerLock ||
+                                        container.webkitRequestPointerLock;
+            container.requestPointerLock();
+            
+            // Reset objects if needed
+            resetObjects();
+        }
+        
+        function endGame() {
+            gameActive = false;
+            clearInterval(gameTimer);
+            
+            // Stop ambient sound
+            if (ambientSound && ambientSound.isPlaying) {
+                ambientSound.stop();
+                console.log('Ambient sound stopped');
+            }
+            
+            // Exit pointer lock
+            document.exitPointerLock = document.exitPointerLock ||
+                                    document.mozExitPointerLock ||
+                                    document.webkitExitPointerLock;
+            document.exitPointerLock();
+            
+            // Show end screen
+            document.getElementById('end-screen').style.display = 'flex';
+            document.getElementById('final-score').textContent = `Your score: ${score}`;
+        }
+        
+        function shareScore() {
+            // Simple implementation - could be expanded to social media sharing
+            try {
+                const text = `I just scored ${score} points in Hit Rage Room!`;
+                navigator.clipboard.writeText(text);
+                alert('Score copied to clipboard! Share it with your friends!');
+            } catch (err) {
+                console.error('Failed to copy: ', err);
+                alert('Could not copy to clipboard. Your score is: ' + score);
+            }
+        }
+        
+        function resetObjects() {
+            // Remove all existing breakable objects
+            for (let i = breakableObjects.length - 1; i >= 0; i--) {
+                scene.remove(breakableObjects[i]);
+            }
+            breakableObjects = [];
+            
+            // Create fresh objects
+            createBreakableObjects();
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            if (gameActive) {
+                // Update player movement
+                const time = performance.now();
+                const delta = (time - prevTime) / 1000;
+                
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize(); // ensures consistent movements regardless of direction
+                
+                if (moveForward || moveBackward) velocity.z -= direction.z * 100.0 * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * 100.0 * delta;
+                
+                // Update camera position
+                const xMovement = velocity.x * delta;
+                const zMovement = velocity.z * delta;
+                
+                // Create a forward vector using ONLY horizontal rotation (Y-axis)
+                // This ensures movement is always horizontally aligned with view direction
+                const forward = new THREE.Vector3(0, 0, -1);
+                forward.applyAxisAngle(new THREE.Vector3(0, 1, 0), camera.rotation.y);
+                
+                // Create a right vector also based only on horizontal rotation
+                const right = new THREE.Vector3(1, 0, 0);
+                right.applyAxisAngle(new THREE.Vector3(0, 1, 0), camera.rotation.y);
+                
+                // Calculate movement
+                const moveVector = new THREE.Vector3();
+                moveVector.addScaledVector(forward, -zMovement);
+                moveVector.addScaledVector(right, -xMovement);
+                
+                // Check for collisions with walls
+                const playerRadius = 0.5;
+                const potentialX = camera.position.x + moveVector.x * playerSpeed;
+                const potentialZ = camera.position.z + moveVector.z * playerSpeed;
+                
+                // Simple collision with room boundaries
+                const wallMargin = playerRadius + 0.1;
+                const newX = Math.max(-(wallSize - wallMargin), Math.min(wallSize - wallMargin, potentialX));
+                const newZ = Math.max(-(wallSize - wallMargin), Math.min(wallSize - wallMargin, potentialZ));
+                
+                // Play footstep sound when moving
+                if (soundEnabled && audioContext && audioContext.state === 'running' && footstepSound) {
+                    // Calculate how far we moved
+                    const moveDist = Math.sqrt(
+                        Math.pow(newX - camera.position.x, 2) + 
+                        Math.pow(newZ - camera.position.z, 2)
+                    );
+                    
+                    // Only play sound if we moved a significant distance and enough time has passed
+                    if (moveDist > 0.05 && time - lastFootstepTime > 350) {
+                        const footstepClone = footstepSound.clone();
+                        // Randomize footstep sound slightly
+                        footstepClone.setPlaybackRate(0.9 + Math.random() * 0.2);
+                        footstepClone.play();
+                        lastFootstepTime = time;
+                    }
+                }
+                
+                camera.position.x = newX;
+                camera.position.z = newZ;
+                
+                // Keep feet on ground by fixing camera height
+                camera.position.y = playerHeight;
+                
+                // Ensure camera orientation NEVER has any Z rotation
+                // Apply rotations directly using the YXZ order
+                camera.rotation.y = camera.userData.horizontalAngle;
+                camera.rotation.x = camera.userData.verticalAngle;
+                camera.rotation.z = 0; // ABSOLUTELY NO Z ROTATION EVER
+                
+                // Continuously update the crosshair to show if we're aiming at a breakable object
+                updateCrosshair();
+                
+                prevTime = time;
+            }
+            
+            // Update particles
+            updateParticles();
+            
+            // Render scene
+            renderer.render(scene, camera);
+        }
+        
+        // Update the updateCrosshair function for consistency with onMouseClick
+        function updateCrosshair() {
+            // Create a direction vector for the center of the screen (same as in onMouseClick)
+            const direction = new THREE.Vector3(0, 0, -1);
+            direction.applyQuaternion(camera.quaternion);
+            
+            // Set raycaster using the calculated direction
+            raycaster.set(camera.position, direction.normalize());
+            
+            // Find intersections with all objects (consistent with click function)
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            
+            const crosshair = document.getElementById('crosshair');
+            let targetFound = false;
+            
+            if (intersects.length > 0) {
+                // Check all intersected objects for breakable ones
+                for (let i = 0; i < intersects.length && !targetFound; i++) {
+                    let obj = intersects[i].object;
+                    
+                    // Check if this object is directly in breakableObjects
+                    if (breakableObjects.includes(obj)) {
+                        targetFound = true;
+                        break;
+                    }
+                    
+                    // Check if any parent is in breakableObjects
+                    let parent = obj.parent;
+                    while (parent) {
+                        if (breakableObjects.includes(parent)) {
+                            targetFound = true;
+                            break;
+                        }
+                        parent = parent.parent;
+                    }
+                }
+            }
+            
+            if (targetFound) {
+                if (crosshair.classList) {
+                    crosshair.classList.add('target');
+                }
+            } else {
+                if (crosshair.classList) {
+                    crosshair.classList.remove('target');
+                }
+            }
+        }
+        
+        // Add at the end of the script section, right before the init call
+        function showDamageIndicator(position, durability) {
+            // Convert 3D position to screen position
+            const vector = position.clone();
+            vector.project(camera);
+            
+            const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+            const y = (vector.y * -0.5 + 0.5) * window.innerHeight;
+            
+            // Create damage indicator element
+            const indicator = document.createElement('div');
+            indicator.className = 'damage-indicator';
+            indicator.textContent = durability === 1 ? 'FINAL HIT!' : `${durability} HP`;
+            indicator.style.left = `${x}px`;
+            indicator.style.top = `${y}px`;
+            
+            // Add to DOM
+            document.body.appendChild(indicator);
+            
+            console.log(`Showing damage indicator: ${indicator.textContent} at (${x}, ${y})`);
+            
+            // Remove after animation completes
+            setTimeout(() => {
+                if (indicator.parentNode) {
+                    indicator.parentNode.removeChild(indicator);
+                }
+            }, 1000);
+        }
+        
+        // Initialize the game when the window loads
+        window.onload = init;
+    </script>
+    
+    <!-- Direct Audio Implementation -->
+    <script>
+        // Direct audio implementation as a last resort
+        (function() {
+            console.log("Initializing direct audio system");
+            
+            // Create audio elements directly
+            const glassBreakSound = new Audio();
+            const woodBreakSound = new Audio();
+            const hitSound = new Audio();
+            
+            // Simple beep sounds as data URLs to avoid any loading issues
+            // Different frequencies for different materials
+            const glassBreakUrl = 'data:audio/wav;base64,UklGRqB5AABXQVZFZm10IBAAAAABAAEARKwAAESsAAABAAgAZGF0YYx5AAAAfwAAgH8AAIB/AACAfwAAgH8AAIB/AACAfwAAgH8AAIB/AACAfwAAgH8AAIB/AACAfwAAgH8AAIB/AACAfwAAgH8AAIB/AACAfwAAgH8AAIB/AACAfwAAgH8AAIB/AACAfwAAAAAAAH8AAAAAAAAAfwAAAAAAAH8AAAAAAAAAfwAAAAAA//8AAAAAAAD//wAAAAD//wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA/////wAA//8AAP//AAD//wAA//8AAP//AAD/////AAAAAP//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//8AAAAAAAAAAAAAAAD//wAA/////wAAAAAAAP//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//wAAAAD//wAA//8AAAAAAAD//wAA//8AAAAAAAD//wAA//8AAAAAAAD//wAA//8AAAAAAAD//wAA//8AAAAAAAD//wAA';
+            const woodBreakUrl = 'data:audio/wav;base64,UklGRvRtAABXQVZFZm10IBAAAAABAAEARKwAAESsAAABAAgAZGF0YdBtAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAH8AAIA/AACAPwAAgD8AAIA/AACAPwAAgAAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAgD8AAIA/AACAPwAAgD8AAIA/AACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAAAIA/AAAAgD8AAACAPwAA';
+            const hitUrl = 'data:audio/wav;base64,UklGRngDAABXQVZFZm10IBAAAAABAAEARKwAAESsAAABAAgAZGF0YVQDAAAAgwEqANH+zv+RAHkBawICJQERAIUB4wGkAA0A6AA0Ab4AXP+d/iP/Tv9y/tj9gf6LAG8BWQFdANn/DQHdApoEoQXEBI8DCwP5An8CcQK4ArgCpwLKAjUDsgIEAl4BNQCz/oT9evt9+uj6HPudO5I74DsFPLw71jpqOiU6hjieNn41UTV5NUw17jWgN4o6fjz+PHA8JzuzOVw3KDVrNCw0mTQ3Nlk3dzdCNzs3yTZUNmU2YjYBN9Q4Xzp8O6g8VD7aPwcB1wHBAkADfgRWBrEGHgcBCAYIdQdFBisF4AO0AlgBCACR/2f/lP41/pL+/P7y/rr+MP6e/uT+U/9V/wX/pP47/jX+C/9EAZIDpQWPB3UIOAlWCYIJvQi6CCcILAiFB+AF8wP7AR8AeP66/fL9wv0h/fn6t/n0+Er5XPl3+CD4B/gu+f75H/uc/Cf+tf8KAFQAxQBhAJoAYAHnAeEBfwLtAZYBGAGPAAwBcgEHAm0ByACKAO3/cf81/+L+Y/5C/hr+Lv4I/s39ov3P/cb9Av5U/nD+ZP5p/ln+Pf48/jv+Mf4s/jL+PP49/kL+WP5j/mj+a/5s/m7+bP5o/mD+S/42/jr+ZP5n/lr+aP7N/t/+xf7e/hf/F//D/pz+xf8FAEr/Nv/7/2UAmP+o/w8AdgBbAEEARwChAO8AGgFLAYMBvQHiAQQCDQIQAkoCjAJfAgQC2QECAkACFwLfAb0BogGtAbkBuQGtAY0BGwHmAMwAugCGABMAyP+r/3H/5P6F/mX+RP4S/vT9Fv4E/qz9nf3p/T7+Mv7q/cf98P0Z/j7+Sv5F/kD+UP5j/nn+l/62/s7+5/4E/xn/L/9B/0v/U/9a/2L/af9w/3b/e/+D/4f/jP+S/5X/l/+Y/5v/nf+f/6L/pP+n/6n/q/+t/67/sP+x/7P/tP+2/7f/uf+6/7v/vP+9/77/v//A/8H/wf/C/8P/xP/F/8b/x//I/8j/yP/J/8n/yP/I/8j/x//H/8f/x//H/8f/x//G/8b/xv/G/8X/xf/F/8X/xP/E/8T/w//D/8P/wv/C/8L/wf/B/8D/wP+//7//v/++/77/vf+9/7z/vP+7/7r/uv+5/7n/uP+4/7j/t/+3/7b/tv+1/7X/tP+z/7P/sv+y/7H/sP+w/6//r/+u/67/rf+t/6z/q/+r/6r/qf+p/6j/p/+m/6b/pf+k/6P/o/+i/6H/'.substring(0, 4096);
+            
+            // Set sources
+            glassBreakSound.src = glassBreakUrl;
+            woodBreakSound.src = woodBreakUrl; 
+            hitSound.src = hitUrl;
+            
+            // Volume settings
+            glassBreakSound.volume = 0.5;
+            woodBreakSound.volume = 0.5;
+            hitSound.volume = 0.3;
+            
+            // Force preload
+            glassBreakSound.load();
+            woodBreakSound.load();
+            hitSound.load();
+            
+            // Test button - force audio to play through direct user interaction
+            const audioTestButton = document.createElement('button');
+            audioTestButton.innerHTML = 'PLAY SOUND';
+            audioTestButton.style.position = 'absolute';
+            audioTestButton.style.top = '20px';
+            audioTestButton.style.left = '20px';
+            audioTestButton.style.zIndex = '10000';
+            audioTestButton.style.backgroundColor = 'green';
+            audioTestButton.style.color = 'white';
+            audioTestButton.style.padding = '15px';
+            audioTestButton.style.fontWeight = 'bold';
+            audioTestButton.style.border = 'none';
+            audioTestButton.style.borderRadius = '5px';
+            
+            audioTestButton.addEventListener('click', function() {
+                try {
+                    // Play all sounds to test
+                    const testSound = hitSound.cloneNode();
+                    testSound.volume = 0.3;
+                    testSound.play().then(() => {
+                        console.log("Direct audio system test successful!");
+                        // Add success message on screen
+                        const msg = document.createElement('div');
+                        msg.textContent = 'Sound is working!';
+                        msg.style.position = 'absolute';
+                        msg.style.top = '80px';
+                        msg.style.left = '20px';
+                        msg.style.backgroundColor = 'rgba(0,0,0,0.7)';
+                        msg.style.color = 'white';
+                        msg.style.padding = '10px';
+                        msg.style.borderRadius = '5px';
+                        document.body.appendChild(msg);
+                        setTimeout(() => document.body.removeChild(msg), 3000);
+                    }).catch(e => {
+                        console.error("Failed to play direct audio:", e);
+                        alert("Error: " + e.message + "\n\nTry checking if your browser allows audio playback or if your system is muted.");
+                    });
+                } catch(e) {
+                    console.error("Exception trying to play direct audio:", e);
+                    alert("Audio system error: " + e.message);
+                }
+            });
+            
+            document.body.appendChild(audioTestButton);
+            
+            // Override breakObject to use our direct audio system
+            const originalBreakObject = window.breakObject;
+            window.breakObject = function(object) {
+                // Call the original function
+                originalBreakObject.apply(this, arguments);
+                
+                try {
+                    console.log("Direct audio playback in breakObject");
+                    
+                    // Check if we need to play hit or break sound
+                    if (object.userData && object.userData.durability && object.userData.durability > 0) {
+                        // Play hit sound
+                        const sound = hitSound.cloneNode();
+                        sound.play().catch(e => console.error("Error playing direct hit sound:", e));
+                    } else {
+                        // Play break sound based on type
+                        let soundToPlay = woodBreakSound;
+                        if (object.userData && object.userData.type === 'glass') {
+                            soundToPlay = glassBreakSound;
+                        }
+                        
+                        const sound = soundToPlay.cloneNode();
+                        sound.play().catch(e => console.error("Error playing direct break sound:", e));
+                    }
+                } catch(e) {
+                    console.error("Error in direct audio playback:", e);
+                }
+            };
+            
+            // Add diagnostic information and volume check
+            const volumeInfo = document.createElement('div');
+            volumeInfo.style.position = 'absolute';
+            volumeInfo.style.bottom = '60px';
+            volumeInfo.style.right = '20px';
+            volumeInfo.style.zIndex = '1000';
+            volumeInfo.style.backgroundColor = 'rgba(0,0,0,0.7)';
+            volumeInfo.style.color = 'white';
+            volumeInfo.style.padding = '10px';
+            volumeInfo.style.borderRadius = '5px';
+            volumeInfo.style.fontSize = '12px';
+            
+            // Update volume information
+            volumeInfo.textContent = "Audio Enabled: " + (typeof AudioContext !== 'undefined' ? "Yes" : "No") + 
+                                   " | System Volume: Check your system volume settings";
+            
+            document.body.appendChild(volumeInfo);
+            
+            console.log("Direct audio system initialization complete");
+        })();
+    </script>
+</body>
+</html>
